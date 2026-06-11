@@ -1,6 +1,6 @@
 'use strict';
 // 투타 밸런스 측정 시뮬레이터
-//   node tools/balance-sim.js [games=10] [seed=1]
+//   node tools/balance-sim.js [games=10] [seed=1] [--noaids]
 //
 // 사람을 모사한 봇 2개로 풀게임을 돌리고 목표 지표와 비교한다.
 //   타자 봇: 반응 지연 + 구속 읽기 오차(빠를수록 큼) + 모터 조준 오차 +
@@ -28,33 +28,45 @@ function gauss(rng) {
 }
 
 class HumanBatterBot {
-  constructor(rng) {
+  // 비관적 인지 모델: 반응 지연 250~350ms, 시각 신호 없이는 타이밍 추정 불가 가정.
+  // aids=true  → 게이지/수축 링 기반 "일치-타이밍" (예측 가능한 신호 추적: σ75ms,
+  //              직전 구속과 크게 다르면 σ100ms + 15% 완전 속음) + 도달점 링 12%부터(조준 양호)
+  // aids=false → 타이밍은 어림짐작(비행시간의 45~130% 균등), 링 35%부터(조준 나쁨)
+  constructor(rng, aids = true) {
     this.rng = rng;
-    this.expFlight = 520; // 체감 평균 구속(비행시간)에 적응
+    this.aids = aids;
+    this.lastFlight = 560;
   }
-  // pitchStart 시점에 스윙 계획을 세운다. null = 지켜봄
   plan(cp, windup, count) {
     const rng = this.rng;
     const flight = cp.flightMs;
-    // 인지: 궤적을 읽고 도달점을 추정 (빠른 공일수록 부정확)
-    const sigmaP = 0.30 + 0.18 * (500 / flight);
+    const total = windup + flight;
+    // 인지: 도달점 추정 (링이 일찍 뜰수록 읽을 시간이 길다)
+    const sigmaP = this.aids ? 0.28 + 0.10 * (500 / flight) : 0.45 + 0.18 * (500 / flight);
     const px = cp.plate.x + gauss(rng) * sigmaP;
     const py = cp.plate.y + gauss(rng) * sigmaP;
-    // 스윙 판단 (보더라인 추격 포함)
+    // 스윙 판단
     const m = Math.max(Math.abs(px), Math.abs(py));
     let pSwing = m <= 1.0 ? 0.80 : m <= 1.25 ? 0.42 : m <= 1.6 ? 0.15 : 0.05;
-    if (count.s === 2) pSwing = Math.min(1, pSwing * 1.4 + 0.08); // 2스트라이크 방어 스윙
-    if (count.b === 3 && m > 1.0) pSwing *= 0.45;                  // 풀카운트 골라내기
+    if (count.s === 2) pSwing = Math.min(1, pSwing * 1.4 + 0.08);
+    if (count.b === 3 && m > 1.0) pSwing *= 0.45;
     if (rng() > pSwing) return null;
-    // 타이밍: 평균 구속 기준으로 계획하고 비행 중 55%만 보정 → 오프스피드에 속음
-    const planned = windup + 0.45 * this.expFlight + 0.55 * flight;
-    let dt = planned + gauss(rng) * 75 + 8;
-    if (rng() < 0.10) dt += (rng() < 0.5 ? -1 : 1) * (120 + rng() * 120); // 완전히 속은 스윙
-    dt = Math.max(dt, windup + 150 + rng() * 100); // 인간 반응 한계 150~250ms
-    this.expFlight = this.expFlight * 0.7 + flight * 0.3;
-    // 모터 오차 (마우스 미세 조준)
-    const aim = { x: px + gauss(rng) * 0.15, y: py + gauss(rng) * 0.15 };
-    return { aim, dt, bunt: false };
+    // 타이밍
+    let dt;
+    if (this.aids) {
+      const speedJump = Math.abs(flight - this.lastFlight) > 120;
+      const sig = speedJump ? 100 : 75;
+      dt = total + gauss(rng) * sig + 5;
+      if (rng() < (speedJump ? 0.15 : 0.08)) dt += (rng() < 0.5 ? -1 : 1) * (140 + rng() * 120); // 완전 속음
+    } else {
+      dt = windup + flight * (0.45 + rng() * 0.85) + gauss(rng) * 80; // 신호 없음 → 어림짐작
+    }
+    dt = Math.max(dt, windup + 250 + rng() * 100); // 반응 한계 250~350ms
+    this.lastFlight = flight;
+    // 모터 오차 + 가끔 마우스가 도달점까지 못 감
+    let ax = px + gauss(rng) * 0.12, ay = py + gauss(rng) * 0.12;
+    if (rng() < 0.12) { ax = px * 0.6; ay = py * 0.6; }
+    return { aim: { x: ax, y: ay }, dt, bunt: false };
   }
 }
 
@@ -84,11 +96,11 @@ function throwDecision(e, L) { // 사람 흉내: 잡을 수 있는 포스 선행
   return lead.to >= 4 ? 4 : lead.to;
 }
 
-function playGame(seed) {
+function playGame(seed, aids = true) {
   const rng = mulberry32(seed);
   const e = new GameEngine({ rng: mulberry32(seed + 5000) });
   e.startGame(); e.drainEvents();
-  const bats = { away: new HumanBatterBot(mulberry32(seed + 11)), home: new HumanBatterBot(mulberry32(seed + 22)) };
+  const bats = { away: new HumanBatterBot(mulberry32(seed + 11), aids), home: new HumanBatterBot(mulberry32(seed + 22), aids) };
   const S = {
     swings: 0, whiffs: 0, fouls: 0, inplay: 0,
     K: { away: 0, home: 0 }, BB: { away: 0, home: 0 }, HR: 0, SF: { away: 0, home: 0 },
@@ -174,15 +186,17 @@ function playGame(seed) {
   return res;
 }
 
-const games = +process.argv[2] || 10;
-const seed0 = +process.argv[3] || 1;
+const args = process.argv.slice(2).filter(a => a !== '--noaids');
+const AIDS = !process.argv.includes('--noaids');
+const games = +args[0] || 10;
+const seed0 = +args[1] || 1;
 const all = [];
-for (let i = 0; i < games; i++) all.push(playGame(seed0 + i * 137));
+for (let i = 0; i < games; i++) all.push(playGame(seed0 + i * 137, AIDS));
 
 const avg = k => all.reduce((a, g) => a + (typeof k === 'function' ? k(g) : g[k]), 0) / all.length;
 const contact = g => g.swings ? (g.fouls + g.inplay) / g.swings : 0;
 
-console.log(`games=${games} (seed ${seed0}~)  완주: ${all.filter(g => g.finished).length}/${games}`);
+console.log(`games=${games} (seed ${seed0}~, 시각보조 ${AIDS ? 'ON' : 'OFF'})  완주: ${all.filter(g => g.finished).length}/${games}`);
 console.log('지표                      평균     목표');
 console.log(`총 득점/경기            ${avg('runs').toFixed(1).padStart(6)}    7~12`);
 console.log(`팀 타율                 ${avg(g => (g.BA_away + g.BA_home) / 2).toFixed(3).padStart(6)}    0.230~0.280`);

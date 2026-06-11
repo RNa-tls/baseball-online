@@ -136,9 +136,11 @@ class GameEngine {
     this.swung = false;
     this.pitchTimer = RULES.windupMs + flightMs + RULES.swingGraceMs;
     this.phase = 'PITCH_LIVE';
+    const bat = this.batter();
+    const sweetMs = Math.round((70 + bat.con * 7) * (this.strikes >= 2 ? 1.15 : 1));
     this.emit('pitchStart', {
       kind: p.kind, plate: { x: plateX, y: plateY },
-      breakX: kind.breakX, breakY: kind.breakY, flightMs, windupMs: RULES.windupMs,
+      breakX: kind.breakX, breakY: kind.breakY, flightMs, windupMs: RULES.windupMs, sweetMs,
       stamina: Math.round(this.stamina[side]), pitchCount: this.pitchCount[side],
     });
   }
@@ -165,14 +167,15 @@ class GameEngine {
     const d = dist2(aimX, aimY, plate.x, plate.y);
     const twoK = this.strikes >= 2 ? 1.15 : 1; // 2스트라이크 커트 보정
     const timingWin = (bunt ? 190 : 70 + bat.con * 7) * twoK;
-    const hitWin = (bunt ? 1.05 : 0.50 + bat.con * 0.055) * twoK;
+    const hitWin = (bunt ? 1.05 : 0.47 + bat.con * 0.05) * twoK;
     const tN = Math.abs(terr) / timingWin, dN = d / hitWin;
 
-    if (dN > 1.3 || tN > 1.18) { this.addStrike('swinging'); return; }
-    if (dN > 1 || tN > 1) { this.foulBall(bunt); return; } // 가장자리 컨택 → 파울로 살림
+    const fb = { terr: Math.round(terr), why: tN >= dN ? 'timing' : 'aim' };
+    if (dN > 1.5 || tN > 1.4) { this.addStrike('swinging', fb); return; }
+    if (dN > 1 || tN > 1) { this.foulBall(bunt, fb); return; } // 가장자리 컨택 → 파울로 살림
     const q = (1 - dN) * (1 - tN);
     if (q < 0.18) { // 약한 컨택 → 파울팁 (인플레이 평균 질을 높게 유지)
-      this.foulBall(bunt);
+      this.foulBall(bunt, fb);
       return;
     }
     let exitV, la, spray;
@@ -181,32 +184,32 @@ class GameEngine {
       la = -4 + this.randn() * 6;
       spray = (aimX - plate.x) * 35 + this.randn() * 18;
     } else {
-      exitV = 64 + Math.pow(q, 0.8) * (66 + bat.pow * 11) + this.randn() * 6;
+      exitV = 61 + Math.pow(q, 0.8) * (58 + bat.pow * 12.5) + this.randn() * 6;
       la = 18 - (aimY - plate.y) * 58 + this.randn() * 8; // 공 위를 치면 땅볼, 아래 받치면 플라이
       spray = terr * 0.42 + (plate.x - aimX) * 18 + this.randn() * 8; // 빠른 스윙=당겨침(좌측)
     }
     la = clamp(la, -14, 64);
     spray = clamp(spray, -65, 65);
-    if (Math.abs(spray) > FIELD.foulDeg) { this.foulBall(bunt); return; }
+    if (Math.abs(spray) > FIELD.foulDeg) { this.foulBall(bunt, { terr: Math.round(terr), why: 'spray' }); return; }
     this.startLive(exitV, la, spray, bunt, q);
   }
 
-  foulBall(bunt) {
+  foulBall(bunt, fb = {}) {
     if (bunt && this.strikes >= 2) { // 번트 파울 = 삼진
-      this.emit('pitchResult', { result: 'foul', count: this.count() });
+      this.emit('pitchResult', Object.assign({ result: 'foul', count: this.count() }, fb));
       this.strikeOut('번트 파울 삼진');
       return;
     }
     if (this.strikes < 2) this.strikes++;
-    this.emit('pitchResult', { result: 'foul', count: this.count() });
+    this.emit('pitchResult', Object.assign({ result: 'foul', count: this.count() }, fb));
     this.backToPitching();
   }
 
   count() { return { b: this.balls, s: this.strikes, o: this.outs }; }
 
-  addStrike(how) {
+  addStrike(how, fb = {}) {
     this.strikes++;
-    this.emit('pitchResult', { result: how === 'called' ? 'strike' : 'whiff', count: this.count() });
+    this.emit('pitchResult', Object.assign({ result: how === 'called' ? 'strike' : 'whiff', count: this.count() }, fb));
     if (this.strikes >= 3) this.strikeOut(how === 'called' ? '루킹 삼진' : '헛스윙 삼진');
     else this.backToPitching();
   }

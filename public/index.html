@@ -114,6 +114,7 @@ const SFX = {
   strike(){ tone(880, 0.08, 0.25); },
   ball()  { tone(520, 0.08, 0.18); },
   ui()    { tone(700, 0.05, 0.15); },
+  cue()   { tone(1320, 0.07, 0.3, 'sine'); }, // 정타 존 진입 신호
 };
 
 /* ============================== 네트워크 ============================== */
@@ -169,6 +170,7 @@ const G = {
   mouse: { x: 320, y: 200 },
   keys: new Set(), moveDir: { x: 0, y: 0 },
   banner: null, // {text, until}
+  mySwings: 0, timingFb: null,
 };
 
 const ZC = { x: 320, y: 196, s: 47 }; // 스트라이크존 중심/스케일(px per zone unit)
@@ -196,6 +198,7 @@ function handle(m) {
       G.view = G.viewTarget = m.state.phase === 'LIVE' ? 'field' : 'pitch';
       G.pitcherUI = { kind: null, aimLocked: null, gaugeAt: 0, step: 0 };
       G.bunt = false; G.playMsg = m.state.lastPlay || ''; G.playMsgAt = now();
+      G.mySwings = 0; G.timingFb = null;
       $('menu').style.display = 'none'; $('over').style.display = 'none';
       notice('', false); reconnecting = false;
       cv.classList.add('playing');
@@ -210,7 +213,7 @@ function handle(m) {
       }
       break;
     case 'pitchStart':
-      G.pitch = { at: now(), windup: m.windupMs, flight: m.flightMs, kind: m.kind, plate: m.plate, bx: m.breakX, by: m.breakY, swung: false };
+      G.pitch = { at: now(), windup: m.windupMs, flight: m.flightMs, kind: m.kind, plate: m.plate, bx: m.breakX, by: m.breakY, swung: false, sweet: m.sweetMs || 110, cued: false };
       if (G.st) { G.st.pitcher.stamina = m.stamina; G.st.pitcher.count = m.pitchCount; }
       G.pitcherUI = { kind: null, aimLocked: null, gaugeAt: 0, step: 0 };
       setView('pitch');
@@ -221,6 +224,14 @@ function handle(m) {
       const map = { ball: ['BALL', '#7ec8ff'], strike: ['STRIKE!', '#ffd23f'], whiff: ['헛스윙!', '#ff9d3f'], foul: ['FOUL', '#cccccc'], inPlay: ['', ''] };
       const r = map[m.result];
       if (r && r[0]) { G.resultFlash = { text: r[0], color: r[1], at: now() }; if (m.result === 'ball') SFX.ball(); else SFX.strike(); }
+      if ((m.result === 'whiff' || m.result === 'foul') && typeof m.terr === 'number' && myBatting()) {
+        const a = Math.abs(m.terr);
+        let txt;
+        if (m.why === 'aim') txt = '조준이 빗나감 — 도달점 링을 클릭!';
+        else if (m.why === 'spray') txt = '타이밍 좋았음 — 파울';
+        else txt = (m.terr < 0 ? `${a}ms 빨랐음 ◀` : `▶ ${a}ms 늦었음`) + (m.result === 'foul' ? ' (커트!)' : '');
+        G.timingFb = { text: txt, at: now(), whiff: m.result === 'whiff' };
+      }
       if (m.result === 'inPlay') setView('field');
       break;
     }
@@ -321,6 +332,7 @@ function doSwingClick() {
   const dt = now() - P.at;
   if (dt > P.windup + P.flight + (G.cfg.rules.swingGraceMs || 250)) return;
   P.swung = true; P.swingAt = now(); P.swingPos = { ...G.mouse };
+  G.mySwings++;
   wsend({ t: 'swing', aim: zoneCoords(G.mouse), dt, bunt: G.bunt });
   SFX.whoosh();
 }
@@ -529,12 +541,30 @@ function drawPitchBall(t) {
   const prog = clamp((e - P.windup) / P.flight, 0, 1);
   const b = pitchBallPos(prog, P);
   if (prog >= 1 && e > P.windup + P.flight + 700) return;
-  // 타자용 도달점 힌트: 비행 35% 이후 점점 선명해짐 (궤적을 "읽는" 보조)
-  if (myBatting() && prog > 0.35 && prog < 1 && !P.swung) {
+  // 타자 보조: 도달점 링(12%~) + 수축 타이밍 링 (겹치는 순간 = 정타)
+  const total = P.windup + P.flight;
+  const inSweet = Math.abs(e - total) <= P.sweet;
+  if (myBatting() && prog > 0.12 && !P.swung && e < total + 350) {
     const pp = pitchBallPos(1, P);
-    ctx.globalAlpha = Math.min(0.65, (prog - 0.35) / 0.5);
-    ctx.strokeStyle = '#ffd23f'; ctx.lineWidth = 1.5;
-    ctx.beginPath(); ctx.arc(pp.x, pp.y, 7, 0, 7); ctx.stroke();
+    const a = clamp((prog - 0.12) / 0.18, 0, 1);
+    // 정타 존 진입: 플래시 + 사운드 큐
+    if (inSweet && !P.cued) { P.cued = true; SFX.cue(); }
+    if (inSweet) {
+      ctx.globalAlpha = 0.18;
+      ctx.fillStyle = '#7dff8a';
+      ctx.beginPath(); ctx.arc(pp.x, pp.y, 13, 0, 7); ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+    // 도달점 링 (타겟)
+    ctx.globalAlpha = 0.35 + 0.6 * a;
+    ctx.strokeStyle = inSweet ? '#7dff8a' : '#ffd23f';
+    ctx.lineWidth = inSweet ? 3 : 2;
+    ctx.beginPath(); ctx.arc(pp.x, pp.y, 10, 0, 7); ctx.stroke();
+    // 수축 링: 공과 함께 줄어들어 도달 순간 타겟과 일치
+    const rr = 10 + (1 - prog) * 46;
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = inSweet ? 'rgba(125,255,138,0.95)' : 'rgba(255,255,255,0.8)';
+    ctx.beginPath(); ctx.arc(pp.x, pp.y, rr, 0, 7); ctx.stroke();
     ctx.globalAlpha = 1;
   }
   ctx.fillStyle = '#fff';
@@ -563,6 +593,10 @@ function drawPitchUI() {
     }
     textO(G.bunt ? '번트 모드 [B 해제]' : '스윙 조준 — 클릭! [B 번트]', 320, 348, 11, G.bunt ? '#7ec8ff' : '#fff');
     if (st.phase === 'PITCHING' && !G.pitch) textO('상대 투수 준비 중...', 320, 160, 13, '#cde');
+    drawSwingGauge(t);
+    if (G.mySwings < 3 && G.pitch && !G.pitch.swung) {
+      textO('흰 링이 노란 링에 겹칠 때 = 정타! (게이지 초록 구간)', 320, 332, 10, '#7dff8a');
+    }
   } else {
     const U = G.pitcherUI;
     if (st.phase === 'PITCHING') {
@@ -611,6 +645,38 @@ function drawPitchUI() {
   // 카운트 (B/S/O)
   drawCount(st, 14, 296);
   if (st.phase === 'MID_INNING') textO('공수 교대...', 320, 175, 16, '#fff');
+}
+
+function drawSwingGauge(t) {
+  // 스윙 타이밍 바: 노란 구간=커트(파울), 초록 구간=정타, 중앙선=완벽
+  const P = G.pitch;
+  if (!P) return;
+  const e = t - P.at;
+  const total = P.windup + P.flight;
+  if (e > total + 500) return;
+  const x0 = 234, y0 = 254, w = 172, h = 10;
+  const span = total * 1.25;
+  const map = v => x0 + clamp(v / span, 0, 1) * w;
+  px(x0 - 2, y0 - 2, w + 4, h + 4, 'rgba(13,21,32,0.85)');
+  px(x0, y0, w, h, '#202b3a');
+  // 커트(파울) 구간: 정타 윈도우 ×1.6
+  px(map(total - P.sweet * 1.6), y0, map(total + P.sweet * 1.6) - map(total - P.sweet * 1.6), h, '#7a6a20');
+  // 정타 구간
+  px(map(total - P.sweet), y0, map(total + P.sweet) - map(total - P.sweet), h, '#2e7d32');
+  // 완벽 타이밍 중앙선
+  px(map(total) - 1, y0 - 2, 2, h + 4, '#fff');
+  // 진행 바늘
+  const nx = map(e);
+  const inSweet = Math.abs(e - total) <= P.sweet;
+  ctx.fillStyle = inSweet ? '#7dff8a' : '#ffd23f';
+  ctx.beginPath();
+  ctx.moveTo(nx, y0 + h + 1); ctx.lineTo(nx - 4, y0 + h + 7); ctx.lineTo(nx + 4, y0 + h + 7);
+  ctx.closePath(); ctx.fill();
+  textO('스윙 타이밍', x0 - 8, y0 + 5, 9, '#9fb6cc', '#000', 'right');
+  // 직전 스윙 피드백 (교정용)
+  if (G.timingFb && t - G.timingFb.at < 2500) {
+    textO(G.timingFb.text, 320, y0 + 24, 12, G.timingFb.whiff ? '#ff8a7d' : '#cde');
+  }
 }
 
 function drawStamina(st) {

@@ -77,7 +77,7 @@ const RULES = {
   maxInnings: 12, // 이후 무승부
   ticksPerSec: 20,
   tickMs: 50,
-  swingGraceMs: 250,  // 레이턴시 유예
+  swingGraceMs: 400,  // 레이턴시 유예 (핑 + 늦은 스윙 꼬리까지 흡수)
   windupMs: 500,      // 투구 와인드업 연출 (판정 시계에 포함 — 클라/서버 동기 기준)
   rejoinGraceMs: 30000,
   midInningMs: 3000,
