@@ -1,0 +1,912 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>DUGOUT DUEL — 2인 온라인 야구</title>
+<style>
+  html,body{margin:0;height:100%;background:#1a2433;overflow:hidden;font-family:'Courier New',monospace;}
+  #wrap{position:relative;width:100vw;height:100vh;display:flex;align-items:center;justify-content:center;}
+  canvas{image-rendering:pixelated;image-rendering:crisp-edges;background:#000;}
+  canvas.playing{cursor:none;}
+  .ui{position:absolute;color:#eee;text-align:center;}
+  #menu{background:#16202e;border:4px solid #3b4f68;padding:28px 40px;box-shadow:0 0 0 4px #0b121c;}
+  #menu h1{font-size:42px;margin:0 0 2px;color:#ffd23f;letter-spacing:4px;text-shadow:3px 3px 0 #b8521d;}
+  #menu .sub{color:#9fb6cc;margin:0 0 22px;font-size:13px;letter-spacing:2px;}
+  button{font-family:inherit;font-size:16px;padding:10px 22px;margin:6px;background:#2e7d32;color:#fff;border:3px solid #174a1a;cursor:pointer;letter-spacing:1px;}
+  button:hover{background:#3a9440;}
+  button:disabled{background:#444;border-color:#222;cursor:default;}
+  input{font-family:inherit;font-size:20px;width:90px;text-align:center;padding:8px;background:#0d1520;color:#ffd23f;border:3px solid #3b4f68;letter-spacing:6px;}
+  #lobby{display:none;margin-top:14px;}
+  #lobby .code{font-size:46px;color:#ffd23f;letter-spacing:10px;text-shadow:2px 2px 0 #b8521d;}
+  #toast{position:absolute;top:12px;left:50%;transform:translateX(-50%);background:#742;color:#ffd;padding:8px 18px;display:none;font-size:14px;border:2px solid #fa5;}
+  #notice{position:absolute;top:18%;left:50%;transform:translateX(-50%);background:rgba(10,16,26,.94);border:3px solid #c33;color:#fff;padding:16px 30px;display:none;font-size:16px;text-align:center;}
+  #over{display:none;background:rgba(10,16,26,.95);border:4px solid #ffd23f;padding:26px 48px;}
+  #over h2{font-size:34px;margin:2px 0 8px;}
+  #over .fs{color:#cde;font-size:15px;margin-bottom:14px;white-space:pre;}
+  .blink{animation:bl 1s steps(2) infinite;}
+  @keyframes bl{50%{opacity:.25;}}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="cv" width="640" height="360"></canvas>
+  <div class="ui" id="menu">
+    <h1>DUGOUT DUEL</h1>
+    <p class="sub">2-PLAYER ONLINE BASEBALL</p>
+    <div id="menuMain">
+      <button id="btnCreate">⚾ 방 만들기</button><br>
+      <input id="joinCode" maxlength="4" placeholder="0000" inputmode="numeric">
+      <button id="btnJoin">코드로 참가</button>
+    </div>
+    <div id="lobby">
+      <div>친구에게 이 코드를 알려주세요</div>
+      <div class="code" id="codeView">0000</div>
+      <div class="blink" style="margin-top:10px;color:#9fb6cc">상대 입장 대기 중...</div>
+    </div>
+  </div>
+  <div class="ui" id="over">
+    <h2 id="overTitle">승리!</h2>
+    <div class="fs" id="overScore"></div>
+    <button id="btnRematch">재대결</button>
+    <button id="btnExit" style="background:#7d2e2e;border-color:#4a1717">나가기</button>
+  </div>
+  <div id="notice"></div>
+  <div id="toast"></div>
+</div>
+<script>
+'use strict';
+/* ============================== 유틸 ============================== */
+const $ = id => document.getElementById(id);
+const cv = $('cv'), ctx = cv.getContext('2d');
+const W = 640, H = 360;
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+const lerp = (a, b, t) => a + (b - a) * t;
+const now = () => performance.now();
+let toastTimer = 0;
+function toast(msg, ms = 2500) {
+  const el = $('toast'); el.textContent = msg; el.style.display = 'block';
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => el.style.display = 'none', ms);
+}
+
+/* ============================== 오디오 (절차 생성) ============================== */
+let AC = null, noiseB = null;
+function ac() {
+  if (!AC) {
+    AC = new (window.AudioContext || window.webkitAudioContext)();
+    noiseB = AC.createBuffer(1, AC.sampleRate * 2, AC.sampleRate);
+    const d = noiseB.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  }
+  if (AC.state === 'suspended') AC.resume();
+  return AC;
+}
+function noise(dur, type, freq, q, vol, attack = 0.002) {
+  const a = ac(), t = a.currentTime;
+  const src = a.createBufferSource(); src.buffer = noiseB;
+  const f = a.createBiquadFilter(); f.type = type; f.frequency.value = freq; f.Q.value = q || 1;
+  const g = a.createGain();
+  g.gain.setValueAtTime(0, t);
+  g.gain.linearRampToValueAtTime(vol, t + attack);
+  g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  src.connect(f); f.connect(g); g.connect(a.destination);
+  src.start(t); src.stop(t + dur + 0.05);
+}
+function tone(freq, dur, vol, type = 'square', when = 0) {
+  const a = ac(), t = a.currentTime + when;
+  const o = a.createOscillator(); o.type = type; o.frequency.value = freq;
+  const g = a.createGain();
+  g.gain.setValueAtTime(vol, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(g); g.connect(a.destination);
+  o.start(t); o.stop(t + dur + 0.05);
+}
+const SFX = {
+  crack() { noise(0.09, 'highpass', 1800, 1, 0.8); tone(170, 0.1, 0.5, 'triangle'); },
+  tick()  { noise(0.05, 'highpass', 2500, 1, 0.35); },
+  pop()   { noise(0.05, 'lowpass', 900, 2, 0.6); },
+  bounce(){ noise(0.06, 'lowpass', 350, 1, 0.3); },
+  whoosh(){ noise(0.22, 'bandpass', 900, 2, 0.25, 0.08); },
+  out()   { tone(440, 0.09, 0.3); tone(330, 0.14, 0.3, 'square', 0.1); },
+  boo()   { noise(1.0, 'lowpass', 400, 1, 0.3, 0.25); },
+  cheer() { noise(1.4, 'bandpass', 1100, 0.6, 0.5, 0.3); noise(1.4, 'bandpass', 500, 0.6, 0.3, 0.25); },
+  homer() { SFX.cheer(); [523, 659, 784, 1046].forEach((f, i) => tone(f, 0.22, 0.25, 'square', i * 0.13)); },
+  strike(){ tone(880, 0.08, 0.25); },
+  ball()  { tone(520, 0.08, 0.18); },
+  ui()    { tone(700, 0.05, 0.15); },
+};
+
+/* ============================== 네트워크 ============================== */
+let ws = null, wsOpen = false, pingMs = 0, pingT = 0;
+let session = null; // {code, token}
+try { session = JSON.parse(sessionStorage.getItem('dd_session') || 'null'); } catch {}
+function saveSession(s) { session = s; try { sessionStorage.setItem('dd_session', JSON.stringify(s)); } catch {} }
+function clearSession() { session = null; try { sessionStorage.removeItem('dd_session'); } catch {} }
+function wsend(o) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); }
+
+let reconnecting = false;
+function connect(thenRejoin) {
+  const proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
+  ws = new WebSocket(proto + location.host);
+  ws.onopen = () => {
+    wsOpen = true;
+    if (thenRejoin && session) wsend({ t: 'rejoin', code: session.code, token: session.token });
+  };
+  ws.onmessage = e => { let m; try { m = JSON.parse(e.data); } catch { return; } handle(m); };
+  ws.onclose = () => {
+    wsOpen = false;
+    if (G.screen === 'game' && !G.over) {
+      notice('서버 연결이 끊겼습니다. 재접속 중...', true);
+      reconnecting = true;
+      setTimeout(() => connect(true), 1500);
+    }
+  };
+}
+setInterval(() => { if (wsOpen) wsend({ t: 'ping', ts: now() }); }, 2000);
+
+function notice(html, show) {
+  const el = $('notice');
+  if (!show) { el.style.display = 'none'; return; }
+  el.innerHTML = html; el.style.display = 'block';
+}
+
+/* ============================== 게임 상태 ============================== */
+const G = {
+  screen: 'title',   // title | game
+  view: 'pitch',     // pitch | field
+  viewTarget: 'pitch',
+  fade: 0,           // 0 없음 → 1 완전 암전
+  you: null, cfg: null, st: null,
+  pitch: null,       // {at, windup, flight, kind, plate, bx, by, swung, resultText, resultAt}
+  pitcherUI: { kind: null, aimLocked: null, gaugeAt: 0, step: 0 }, // step 0:구종 1:조준 2:게이지
+  bunt: false,
+  snaps: [], inPlayInfo: null, trail: [],
+  splashes: [], confetti: [],
+  playMsg: '', playMsgAt: 0,
+  resultFlash: null, // {text, color, at}
+  over: null,
+  oppGoneAt: 0, oppDeadline: 0,
+  mouse: { x: 320, y: 200 },
+  keys: new Set(), moveDir: { x: 0, y: 0 },
+  banner: null, // {text, until}
+};
+
+const ZC = { x: 320, y: 196, s: 47 }; // 스트라이크존 중심/스케일(px per zone unit)
+const FV = { ox: 320, oy: 334, s: 0.70 }; // 필드 좌표(ft)→화면
+const fx = x => FV.ox + x * FV.s;
+const fy = y => FV.oy - y * FV.s;
+
+function myBatting() { return G.st && G.st.battingSide === G.you; }
+function splash(text, sub) { G.splashes.push({ text, sub, at: now() }); }
+
+/* ============================== 메시지 처리 ============================== */
+function handle(m) {
+  switch (m.t) {
+    case 'pong': pingMs = Math.round(now() - m.ts); break;
+    case 'created':
+      saveSession({ code: m.code, token: m.token });
+      $('menuMain').style.display = 'none';
+      $('lobby').style.display = 'block';
+      $('codeView').textContent = m.code;
+      break;
+    case 'joined': saveSession({ code: m.code, token: m.token }); break;
+    case 'start':
+      G.cfg = m.config; G.you = m.you; G.st = m.state;
+      G.screen = 'game'; G.over = null; G.pitch = null; G.snaps = [];
+      G.view = G.viewTarget = m.state.phase === 'LIVE' ? 'field' : 'pitch';
+      G.pitcherUI = { kind: null, aimLocked: null, gaugeAt: 0, step: 0 };
+      G.bunt = false; G.playMsg = m.state.lastPlay || ''; G.playMsgAt = now();
+      $('menu').style.display = 'none'; $('over').style.display = 'none';
+      notice('', false); reconnecting = false;
+      cv.classList.add('playing');
+      if (m.resumed) toast('게임에 복귀했습니다!');
+      else splash(G.you === 'away' ? '선공입니다!' : '후공입니다!', G.you === 'home' ? 'HOME' : 'AWAY');
+      break;
+    case 'state':
+      G.st = m.state;
+      if (m.state.phase === 'PITCHING' || m.state.phase === 'MID_INNING') {
+        // 플레이 결과 직후엔 필드뷰를 잠시 유지 (playResult 핸들러의 지연 전환에 위임)
+        if (!(G.view === 'field' && now() - G.playMsgAt < 1700)) setView('pitch');
+      }
+      break;
+    case 'pitchStart':
+      G.pitch = { at: now(), windup: m.windupMs, flight: m.flightMs, kind: m.kind, plate: m.plate, bx: m.breakX, by: m.breakY, swung: false };
+      if (G.st) { G.st.pitcher.stamina = m.stamina; G.st.pitcher.count = m.pitchCount; }
+      G.pitcherUI = { kind: null, aimLocked: null, gaugeAt: 0, step: 0 };
+      setView('pitch');
+      setTimeout(() => SFX.whoosh(), m.windupMs * 0.8);
+      break;
+    case 'pitchResult': {
+      if (G.st) { G.st.balls = m.count.b; G.st.strikes = m.count.s; G.st.outs = m.count.o; }
+      const map = { ball: ['BALL', '#7ec8ff'], strike: ['STRIKE!', '#ffd23f'], whiff: ['헛스윙!', '#ff9d3f'], foul: ['FOUL', '#cccccc'], inPlay: ['', ''] };
+      const r = map[m.result];
+      if (r && r[0]) { G.resultFlash = { text: r[0], color: r[1], at: now() }; if (m.result === 'ball') SFX.ball(); else SFX.strike(); }
+      if (m.result === 'inPlay') setView('field');
+      break;
+    }
+    case 'inPlay':
+      G.inPlayInfo = { ...m, at: now() }; G.trail = []; G.snaps = [];
+      setView('field');
+      break;
+    case 'snap': G.snaps.push({ at: now(), s: m }); if (G.snaps.length > 40) G.snaps.shift(); break;
+    case 'playResult':
+      G.st = m.state;
+      G.playMsg = m.summary; G.playMsgAt = now();
+      setTimeout(() => { if (G.st && G.st.phase !== 'LIVE') setView('pitch'); }, 1700);
+      break;
+    case 'midInning':
+      G.st = m.state;
+      G.banner = { text: '— 공수 교대 —', until: now() + 2800 };
+      setTimeout(() => setView('pitch'), 900);
+      break;
+    case 'splash':
+      splash(m.text, m.sub);
+      if (m.text === 'HOME RUN!') confettiBurst();
+      break;
+    case 'sound': if (SFX[m.kind]) SFX[m.kind](); break;
+    case 'gameOver': {
+      G.st = m.state || G.st; G.over = m;
+      const win = m.winner === G.you, draw = m.winner === null;
+      $('overTitle').textContent = draw ? '무승부' : win ? '🏆 승리!' : '패배...';
+      $('overTitle').style.color = draw ? '#ccc' : win ? '#ffd23f' : '#f66';
+      let fs = '';
+      if (G.st) {
+        const ra = G.st.score.away.reduce((a, b) => a + b, 0), rh = G.st.score.home.reduce((a, b) => a + b, 0);
+        fs = `AWAY ${ra} : ${rh} HOME`;
+        if (m.forfeit) fs += '\n(상대 연결 끊김 — 몰수승)';
+      }
+      $('overScore').textContent = fs;
+      $('over').style.display = 'block';
+      notice('', false);
+      cv.classList.remove('playing');
+      if (!draw && win) SFX.homer(); else if (!draw) SFX.boo();
+      break;
+    }
+    case 'oppLeft':
+      G.oppGoneAt = now(); G.oppDeadline = m.deadlineMs;
+      break;
+    case 'oppBack':
+      G.oppGoneAt = 0; notice('', false); toast('상대가 돌아왔습니다!');
+      break;
+    case 'error':
+      if (reconnecting || (session && G.screen !== 'game')) { clearSession(); reconnecting = false; notice('', false); }
+      toast(m.msg || '오류');
+      break;
+    case 'info': toast(m.msg || ''); break;
+  }
+}
+
+function setView(v) {
+  if (G.viewTarget !== v) G.viewTarget = v;
+}
+
+function confettiBurst() {
+  for (let i = 0; i < 120; i++) {
+    G.confetti.push({
+      x: Math.random() * W, y: -10 - Math.random() * 120,
+      vy: 40 + Math.random() * 80, vx: (Math.random() - 0.5) * 40,
+      c: ['#ffd23f', '#ff6b6b', '#6bcBff', '#7dff8a', '#ff9df5'][i % 5],
+      at: now(),
+    });
+  }
+}
+
+/* ============================== 입력 ============================== */
+function canvasPos(e) {
+  const r = cv.getBoundingClientRect();
+  return { x: (e.clientX - r.left) * W / r.width, y: (e.clientY - r.top) * H / r.height };
+}
+cv.addEventListener('mousemove', e => { G.mouse = canvasPos(e); });
+cv.addEventListener('contextmenu', e => {
+  e.preventDefault();
+  if (G.screen === 'game' && G.view === 'field' && myBatting()) { wsend({ t: 'run', cmd: 'go' }); SFX.ui(); }
+});
+cv.addEventListener('mousedown', e => {
+  if (e.button !== 0) return;
+  ac(); // 첫 제스처에서 오디오 활성화
+  if (G.screen !== 'game' || !G.st) return;
+  if (G.view === 'pitch') {
+    if (myBatting()) doSwingClick();
+    else doPitcherClick();
+  }
+});
+
+function zoneCoords(p) {
+  return { x: clamp((p.x - ZC.x) / ZC.s, -1.7, 1.7), y: clamp(-(p.y - ZC.y) / ZC.s, -1.7, 1.7) };
+}
+
+function doSwingClick() {
+  const P = G.pitch;
+  if (!P || P.swung) return;
+  const dt = now() - P.at;
+  if (dt > P.windup + P.flight + (G.cfg.rules.swingGraceMs || 250)) return;
+  P.swung = true; P.swingAt = now(); P.swingPos = { ...G.mouse };
+  wsend({ t: 'swing', aim: zoneCoords(G.mouse), dt, bunt: G.bunt });
+  SFX.whoosh();
+}
+
+function doPitcherClick() {
+  if (!G.st || G.st.phase !== 'PITCHING') return;
+  const U = G.pitcherUI;
+  // 구종 버튼 클릭?
+  const bi = pitchBtnAt(G.mouse);
+  if (bi !== null) { U.kind = Object.keys(G.cfg.pitchKinds)[bi]; U.step = 1; SFX.ui(); return; }
+  // 투수교체 버튼?
+  if (swapBtnAt(G.mouse)) { wsend({ t: 'swap' }); SFX.ui(); return; }
+  if (U.step === 1 && U.kind) { // 조준 확정 → 게이지 시작
+    U.aimLocked = zoneCoords(G.mouse);
+    U.gaugeAt = now(); U.step = 2; SFX.ui();
+  } else if (U.step === 2) { // 게이지 → 투구!
+    const power = gaugeVal(now() - U.gaugeAt);
+    wsend({ t: 'pitch', kind: U.kind, aim: U.aimLocked, power });
+    U.step = 0; U.kind = null;
+  }
+}
+function gaugeVal(elapsed) { // 0→1→0 왕복 (주기 1.1s), 1이 정점
+  const t = (elapsed % 1100) / 1100;
+  return 1 - Math.abs(t * 2 - 1);
+}
+const PITCH_BTNS = { x: 196, y: 318, w: 60, h: 26, gap: 4 };
+function pitchBtnAt(p) {
+  const B = PITCH_BTNS;
+  if (p.y < B.y || p.y > B.y + B.h) return null;
+  for (let i = 0; i < 4; i++) {
+    const x0 = B.x + i * (B.w + B.gap);
+    if (p.x >= x0 && p.x <= x0 + B.w) return i;
+  }
+  return null;
+}
+function swapBtnAt(p) {
+  if (!G.st || G.st.swapUsed[G.you] || G.st.pitcher.idx !== 0) return false;
+  return p.x >= 552 && p.x <= 628 && p.y >= 318 && p.y <= 344;
+}
+
+window.addEventListener('keydown', e => {
+  if (G.screen !== 'game') {
+    if (e.key === 'Enter' && $('menu').style.display !== 'none') $('btnJoin').click();
+    return;
+  }
+  const k = e.key;
+  if ([' ', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(k)) e.preventDefault();
+  if (k === ' ') { if (G.view === 'field' && myBatting()) { wsend({ t: 'run', cmd: 'stop' }); SFX.ui(); } return; }
+  if (k === 'b' || k === 'B' || k === 'ㅠ') { if (myBatting()) { G.bunt = !G.bunt; SFX.ui(); } return; }
+  if (k === 'p' || k === 'P' || k === 'ㅔ') { if (!myBatting() && G.st.phase === 'PITCHING') { wsend({ t: 'swap' }); } return; }
+  if (G.view === 'pitch' && !myBatting() && '1234'.includes(k)) {
+    const U = G.pitcherUI;
+    U.kind = Object.keys(G.cfg.pitchKinds)['1234'.indexOf(k)];
+    if (U.step === 0) U.step = 1;
+    SFX.ui(); return;
+  }
+  if (G.view === 'field' && !myBatting()) {
+    if (k === '1' || k === '2' || k === '3') { wsend({ t: 'throw', base: +k }); return; }
+    if (k === 'h' || k === 'H' || k === 'ㅗ' || k === '4') { wsend({ t: 'throw', base: 4 }); return; }
+  }
+  if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'w', 'a', 's', 'd', 'W', 'A', 'S', 'D'].includes(k)) {
+    G.keys.add(k.toLowerCase().replace('arrow', ''));
+    sendMove();
+  }
+});
+window.addEventListener('keyup', e => {
+  const k = e.key.toLowerCase().replace('arrow', '');
+  if (G.keys.delete(k)) sendMove();
+});
+function sendMove() {
+  const K = G.keys;
+  // 화면 기준: 위 = 외야(+y), 좌 = -x
+  const x = (K.has('right') || K.has('d') ? 1 : 0) - (K.has('left') || K.has('a') ? 1 : 0);
+  const y = (K.has('up') || K.has('w') ? 1 : 0) - (K.has('down') || K.has('s') ? 1 : 0);
+  if (x !== G.moveDir.x || y !== G.moveDir.y) {
+    G.moveDir = { x, y };
+    wsend({ t: 'move', dir: { x, y } });
+  }
+}
+
+/* 메뉴 버튼 */
+$('btnCreate').onclick = () => { ac(); SFX.ui(); wsend({ t: 'create' }); };
+$('btnJoin').onclick = () => {
+  ac();
+  const code = $('joinCode').value.trim();
+  if (!/^\d{4}$/.test(code)) { toast('4자리 숫자 코드를 입력하세요'); return; }
+  SFX.ui(); wsend({ t: 'join', code });
+};
+$('joinCode').addEventListener('keydown', e => { if (e.key === 'Enter') $('btnJoin').click(); });
+$('btnRematch').onclick = () => { SFX.ui(); wsend({ t: 'newGame' }); };
+$('btnExit').onclick = () => { clearSession(); location.reload(); };
+
+/* ============================== 렌더링 ============================== */
+function px(x, y, w, h, c) { ctx.fillStyle = c; ctx.fillRect(x | 0, y | 0, w, h); }
+function text(s, x, y, size, c, align = 'center', bold = true) {
+  ctx.font = `${bold ? 'bold ' : ''}${size}px 'Courier New',monospace`;
+  ctx.textAlign = align; ctx.textBaseline = 'middle';
+  ctx.fillStyle = c; ctx.fillText(s, x | 0, y | 0);
+}
+function textO(s, x, y, size, c, oc = '#000', align = 'center') { // 외곽선 텍스트
+  ctx.font = `bold ${size}px 'Courier New',monospace`;
+  ctx.textAlign = align; ctx.textBaseline = 'middle';
+  ctx.lineWidth = Math.max(2, size / 8); ctx.strokeStyle = oc;
+  ctx.strokeText(s, x | 0, y | 0);
+  ctx.fillStyle = c; ctx.fillText(s, x | 0, y | 0);
+}
+
+/* ---------- 백스탑(투구/타격) 뷰 ---------- */
+function drawPitchView(t) {
+  // 하늘 (낮경기) — 픽셀 밴드
+  px(0, 0, W, 60, '#8fd3f4'); px(0, 60, W, 30, '#a5ddf6'); px(0, 90, W, 20, '#bce6f8');
+  // 외야 관중석
+  px(0, 92, W, 36, '#5b6d84');
+  for (let i = 0; i < 160; i++) px((i * 73 % W), 96 + (i * 37 % 28), 2, 2, ['#d9b38c', '#c98', '#eee', '#f6c', '#9cf', '#fd6'][i % 6]);
+  px(0, 126, W, 6, '#33415a'); // 펜스
+  // 잔디 + 내야 흙
+  px(0, 132, W, 228, '#4e9b53');
+  for (let r = 0; r < 12; r++) if (r % 2) px(0, 132 + r * 19, W, 19, '#46904c');
+  ctx.fillStyle = '#b98a52';
+  ctx.beginPath(); ctx.ellipse(320, 250, 290, 115, 0, 0, 7); ctx.fill();
+  ctx.fillStyle = '#4e9b53';
+  ctx.beginPath(); ctx.ellipse(320, 240, 180, 70, 0, 0, 7); ctx.fill();
+  // 마운드
+  ctx.fillStyle = '#c79a60';
+  ctx.beginPath(); ctx.ellipse(320, 138, 36, 13, 0, 0, 7); ctx.fill();
+  px(314, 132, 12, 3, '#e8e0d0');
+  // 홈플레이트 / 타석
+  px(282, 300, 76, 40, '#c79a60');
+  ctx.fillStyle = '#f3efe2';
+  ctx.beginPath(); ctx.moveTo(302, 312); ctx.lineTo(338, 312); ctx.lineTo(338, 322); ctx.lineTo(320, 332); ctx.lineTo(302, 322); ctx.closePath(); ctx.fill();
+
+  drawPitcher(t);
+  drawBatter();
+  drawZone();
+  drawPitchBall(t);
+  drawPitchUI();
+}
+
+function drawPitcher(t) {
+  const P = G.pitch;
+  let frame = 0; // 0 대기 1 와인드업 2 릴리스
+  if (P) {
+    const e = t - P.at;
+    if (e < P.windup * 0.7) frame = 1;
+    else if (e < P.windup + 200) frame = 2;
+  }
+  const x = 320, y = 112;
+  // 다리
+  px(x - 5, y + 18, 4, 10, '#2b3a4e'); px(x + 1, y + 18, 4, 10, '#2b3a4e');
+  if (frame === 1) { px(x - 9, y + 12, 6, 5, '#2b3a4e'); } // 레그킥
+  // 몸통(유니폼)
+  px(x - 6, y + 6, 12, 13, '#e8e8e8');
+  px(x - 6, y + 6, 12, 3, '#b33');
+  // 팔
+  if (frame === 1) { px(x - 10, y - 2, 4, 10, '#e8e8e8'); px(x + 6, y - 2, 4, 10, '#e8e8e8'); }
+  else if (frame === 2) { px(x + 6, y + 2, 9, 4, '#e8e8e8'); }
+  else { px(x - 9, y + 9, 4, 8, '#e8e8e8'); px(x + 5, y + 9, 4, 8, '#e8e8e8'); }
+  // 머리+모자
+  px(x - 4, y - 4, 8, 8, '#e9b98c'); px(x - 5, y - 6, 10, 4, '#b33');
+}
+
+function drawBatter() {
+  const swung = G.pitch && G.pitch.swung && now() - G.pitch.swingAt < 350;
+  const x = 252, y = 268;
+  px(x - 6, y + 26, 5, 14, '#2b3a4e'); px(x + 3, y + 26, 5, 14, '#2b3a4e');
+  px(x - 7, y + 6, 16, 21, G.bunt && myBatting() ? '#3a6ea5' : '#3457a0');
+  px(x - 5, y - 6, 10, 10, '#e9b98c'); px(x - 7, y - 9, 13, 5, '#234');
+  // 배트
+  ctx.strokeStyle = '#d9a45b'; ctx.lineWidth = 4;
+  ctx.beginPath();
+  if (swung) { ctx.moveTo(x + 6, y + 8); ctx.lineTo(x + 42, y + 18); }
+  else if (G.bunt && myBatting()) { ctx.moveTo(x + 2, y + 8); ctx.lineTo(x + 28, y + 6); }
+  else { ctx.moveTo(x + 6, y + 10); ctx.lineTo(x + 24, y - 18); }
+  ctx.stroke();
+}
+
+function drawZone() {
+  const s = ZC.s;
+  ctx.strokeStyle = 'rgba(255,255,255,0.85)'; ctx.lineWidth = 2;
+  ctx.strokeRect(ZC.x - s, ZC.y - s, s * 2, s * 2);
+  ctx.strokeStyle = 'rgba(255,255,255,0.22)'; ctx.lineWidth = 1;
+  for (let i = 1; i < 3; i++) {
+    ctx.beginPath(); ctx.moveTo(ZC.x - s + i * s * 2 / 3, ZC.y - s); ctx.lineTo(ZC.x - s + i * s * 2 / 3, ZC.y + s); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(ZC.x - s, ZC.y - s + i * s * 2 / 3); ctx.lineTo(ZC.x + s, ZC.y - s + i * s * 2 / 3); ctx.stroke();
+  }
+}
+
+function pitchBallPos(prog, P) { // 베지어: 릴리스→(브레이크 반대 제어점)→플레이트
+  const rx = 328, ry = 124;
+  const pxx = ZC.x + P.plate.x * ZC.s, pyy = ZC.y - P.plate.y * ZC.s;
+  const cx = (rx + pxx) / 2 - P.bx * ZC.s * 1.1;
+  const cy = (ry + pyy) / 2 - P.by * ZC.s * -1.1 - 26; // 약간 위로 떠서 들어옴
+  const u = 1 - prog;
+  return {
+    x: u * u * rx + 2 * u * prog * cx + prog * prog * pxx,
+    y: u * u * ry + 2 * u * prog * cy + prog * prog * pyy,
+    r: 1.5 + prog * 4.5,
+  };
+}
+
+function drawPitchBall(t) {
+  const P = G.pitch;
+  if (!P) return;
+  const e = t - P.at;
+  if (e < P.windup) return;
+  const prog = clamp((e - P.windup) / P.flight, 0, 1);
+  const b = pitchBallPos(prog, P);
+  if (prog >= 1 && e > P.windup + P.flight + 700) return;
+  ctx.fillStyle = '#fff';
+  ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, 7); ctx.fill();
+  ctx.strokeStyle = '#c44'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0.5, 2.2); ctx.stroke();
+  if (prog >= 1) { // 도달 위치 마커
+    ctx.strokeStyle = 'rgba(255,210,63,0.9)'; ctx.lineWidth = 1;
+    ctx.strokeRect(b.x - 5, b.y - 5, 10, 10);
+  }
+}
+
+function drawPitchUI() {
+  const t = now();
+  const st = G.st;
+  if (!st) return;
+  if (myBatting()) {
+    // 타자: 조준 크로스헤어
+    const m = G.mouse;
+    const inAim = Math.abs(m.x - ZC.x) < ZC.s * 1.8 && Math.abs(m.y - ZC.y) < ZC.s * 1.8;
+    if (inAim) {
+      ctx.strokeStyle = G.bunt ? '#7ec8ff' : '#ffd23f'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(m.x, m.y, 13, 0, 7); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(m.x - 18, m.y); ctx.lineTo(m.x - 8, m.y); ctx.moveTo(m.x + 8, m.y); ctx.lineTo(m.x + 18, m.y);
+      ctx.moveTo(m.x, m.y - 18); ctx.lineTo(m.x, m.y - 8); ctx.moveTo(m.x, m.y + 8); ctx.lineTo(m.x, m.y + 18); ctx.stroke();
+    }
+    textO(G.bunt ? '번트 모드 [B 해제]' : '스윙 조준 — 클릭! [B 번트]', 320, 348, 11, G.bunt ? '#7ec8ff' : '#fff');
+    if (st.phase === 'PITCHING' && !G.pitch) textO('상대 투수 준비 중...', 320, 160, 13, '#cde');
+  } else {
+    const U = G.pitcherUI;
+    if (st.phase === 'PITCHING') {
+      // 구종 버튼
+      const kinds = Object.entries(G.cfg.pitchKinds);
+      const B = PITCH_BTNS;
+      kinds.forEach(([key, k], i) => {
+        const x0 = B.x + i * (B.w + B.gap);
+        px(x0, B.y, B.w, B.h, U.kind === key ? '#b8521d' : '#22324a');
+        ctx.strokeStyle = U.kind === key ? '#ffd23f' : '#56708e'; ctx.lineWidth = 2;
+        ctx.strokeRect(x0, B.y, B.w, B.h);
+        text(`${i + 1} ${k.label}`, x0 + B.w / 2, B.y + B.h / 2, 10, '#fff');
+      });
+      // 교체 버튼
+      if (!st.swapUsed[G.you] && st.pitcher.idx === 0) {
+        px(552, 318, 76, 26, '#444c2e');
+        ctx.strokeStyle = '#9a5'; ctx.lineWidth = 2; ctx.strokeRect(552, 318, 76, 26);
+        text('P 불펜교체', 590, 331, 10, '#dfc');
+      }
+      // 조준/게이지
+      if (U.step >= 1) {
+        const aim = U.step === 2 ? U.aimLocked : zoneCoords(G.mouse);
+        const ax = ZC.x + aim.x * ZC.s, ay = ZC.y - aim.y * ZC.s;
+        ctx.strokeStyle = '#ff6b6b'; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.arc(ax, ay, 7, 0, 7); ctx.stroke();
+        ctx.beginPath(); ctx.arc(ax, ay, 2, 0, 7); ctx.stroke();
+      }
+      if (U.step === 2) {
+        const v = gaugeVal(t - U.gaugeAt);
+        const gx = 410, gy = 150, gh = 95;
+        px(gx, gy, 14, gh, '#0d1520');
+        px(gx, gy, 14, 8, '#2e7d32'); // 정점 존
+        px(gx + 2, gy + (1 - v) * (gh - 4) + 2, 10, 4, v > 0.92 ? '#7dff8a' : '#ffd23f');
+        ctx.strokeStyle = '#56708e'; ctx.lineWidth = 1; ctx.strokeRect(gx, gy, 14, gh);
+        textO('클릭=릴리스', gx + 7, gy + gh + 12, 9, '#fff');
+      }
+      const guide = U.step === 0 ? '구종 선택 (1~4 또는 클릭)' : U.step === 1 ? '코스 조준 → 클릭' : '게이지 정점에서 클릭!';
+      textO(guide, 320, 348, 11, '#ffd23f');
+      // 스태미나
+      drawStamina(st);
+    } else {
+      textO('투구 판정 대기...', 320, 348, 11, '#cde');
+      drawStamina(st);
+    }
+  }
+  // 카운트 (B/S/O)
+  drawCount(st, 14, 296);
+  if (st.phase === 'MID_INNING') textO('공수 교대...', 320, 175, 16, '#fff');
+}
+
+function drawStamina(st) {
+  const p = st.pitcher;
+  const pc = G.cfg.pitchers[p.idx];
+  px(490, 296, 140, 34, 'rgba(13,21,32,0.8)');
+  text(pc.name + ` · ${p.count}구`, 560, 305, 9, '#cde');
+  px(500, 314, 120, 7, '#0d1520');
+  const v = clamp(p.stamina / 100, 0, 1);
+  px(500, 314, 120 * v, 7, p.stamina < 30 ? '#e54' : p.stamina < 55 ? '#fc3' : '#5d5');
+  if (p.stamina < 30) textO('지침!', 478, 317, 9, '#f88');
+}
+
+function drawCount(st, x, y) {
+  px(x - 4, y - 10, 92, 54, 'rgba(13,21,32,0.8)');
+  const dot = (cx, cy, on, c) => { ctx.fillStyle = on ? c : '#333'; ctx.beginPath(); ctx.arc(cx, cy, 4, 0, 7); ctx.fill(); };
+  text('B', x + 6, y, 11, '#7ec8ff', 'left');
+  for (let i = 0; i < 3; i++) dot(x + 26 + i * 13, y, i < st.balls, '#4c4');
+  text('S', x + 6, y + 15, 11, '#ffd23f', 'left');
+  for (let i = 0; i < 2; i++) dot(x + 26 + i * 13, y + 15, i < st.strikes, '#fc3');
+  text('O', x + 6, y + 30, 11, '#ff6b6b', 'left');
+  for (let i = 0; i < 2; i++) dot(x + 26 + i * 13, y + 30, i < st.outs, '#e54');
+}
+
+/* ---------- 탑뷰(수비/주루) ---------- */
+function fenceDist(deg) {
+  const F = G.cfg.field.fence;
+  return F.c - F.drop * Math.pow(Math.min(Math.abs(deg), 45) / 45, F.exp);
+}
+
+function drawFieldView() {
+  // 잔디
+  px(0, 0, W, H, '#4e9b53');
+  for (let r = 0; r < 20; r++) if (r % 2) px(0, r * 18, W, 18, '#46904c');
+  // 펜스 밖 관중석
+  ctx.fillStyle = '#5b6d84';
+  ctx.beginPath();
+  ctx.moveTo(fx(-fenceDist(-45) * Math.SQRT1_2) - 40, fy(fenceDist(-45) * Math.SQRT1_2) - 60);
+  for (let d = -45; d <= 45; d += 5) {
+    const r = fenceDist(d) + 55;
+    ctx.lineTo(fx(r * Math.sin(d * Math.PI / 180)), fy(r * Math.cos(d * Math.PI / 180)));
+  }
+  ctx.lineTo(W + 40, -40); ctx.lineTo(-40, -40); ctx.closePath(); ctx.fill();
+  // 워닝트랙 + 펜스
+  ctx.strokeStyle = '#b98a52'; ctx.lineWidth = 9;
+  fencePath(8); ctx.stroke();
+  ctx.strokeStyle = '#26415e'; ctx.lineWidth = 4;
+  fencePath(0); ctx.stroke();
+  // 내야 다이아몬드 흙
+  const B = G.cfg.field.bases;
+  ctx.fillStyle = '#c79a60';
+  ctx.beginPath();
+  ctx.moveTo(fx(0), fy(-12));
+  ctx.lineTo(fx(B[1].x + 18), fy(B[1].y - 4));
+  ctx.lineTo(fx(B[2].x), fy(B[2].y + 20));
+  ctx.lineTo(fx(B[3].x - 18), fy(B[3].y - 4));
+  ctx.closePath(); ctx.fill();
+  // 내야 잔디
+  ctx.fillStyle = '#52a258';
+  ctx.beginPath();
+  ctx.moveTo(fx(0), fy(14));
+  ctx.lineTo(fx(B[1].x - 10), fy(B[1].y));
+  ctx.lineTo(fx(B[2].x), fy(B[2].y - 13));
+  ctx.lineTo(fx(B[3].x + 10), fy(B[3].y));
+  ctx.closePath(); ctx.fill();
+  // 파울라인
+  ctx.strokeStyle = '#f3efe2'; ctx.lineWidth = 2;
+  const fl = fenceDist(45) + 2;
+  ctx.beginPath(); ctx.moveTo(fx(0), fy(0)); ctx.lineTo(fx(fl * Math.SQRT1_2), fy(fl * Math.SQRT1_2)); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(fx(0), fy(0)); ctx.lineTo(fx(-fl * Math.SQRT1_2), fy(fl * Math.SQRT1_2)); ctx.stroke();
+  // 마운드/베이스
+  ctx.fillStyle = '#c79a60';
+  ctx.beginPath(); ctx.ellipse(fx(0), fy(59), 8, 6, 0, 0, 7); ctx.fill();
+  const occ = G.st ? G.st.bases : [false, false, false, false];
+  for (let i = 0; i < 4; i++) {
+    const c = i > 0 && occ[i] ? '#ffd23f' : '#f3efe2';
+    px(fx(B[i].x) - 3, fy(B[i].y) - 3, 6, 6, c);
+  }
+
+  const interp = sampleSnaps();
+  if (interp) drawLivePlay(interp);
+  drawFieldUI();
+}
+
+function fencePath(off) {
+  ctx.beginPath();
+  let first = true;
+  for (let d = -45; d <= 45; d += 3) {
+    const r = fenceDist(d) + off;
+    const X = fx(r * Math.sin(d * Math.PI / 180)), Y = fy(r * Math.cos(d * Math.PI / 180));
+    if (first) { ctx.moveTo(X, Y); first = false; } else ctx.lineTo(X, Y);
+  }
+}
+
+function sampleSnaps() {
+  const buf = G.snaps;
+  if (buf.length === 0) return null;
+  const rt = now() - 120;
+  if (buf.length === 1 || rt <= buf[0].at) return buf[buf.length - 1].s;
+  for (let i = buf.length - 1; i > 0; i--) {
+    if (buf[i - 1].at <= rt) {
+      const a = buf[i - 1], b = buf[i];
+      const t = clamp((rt - a.at) / Math.max(1, b.at - a.at), 0, 1);
+      return mixSnap(a.s, b.s, t);
+    }
+  }
+  return buf[buf.length - 1].s;
+}
+
+function mixSnap(a, b, t) {
+  const m = {
+    ball: { x: lerp(a.ball.x, b.ball.x, t), y: lerp(a.ball.y, b.ball.y, t), z: lerp(a.ball.z, b.ball.z, t), mode: b.ball.mode, hr: b.ball.hr },
+    holder: b.holder, ctrl: b.ctrl, outs: b.outs,
+    fielders: b.fielders.map((f, i) => [lerp(a.fielders[i][0], f[0], t), lerp(a.fielders[i][1], f[1], t)]),
+    runners: b.runners.map(r => {
+      const pa = a.runners.find(x => x.li === r.li && x.isBatter === r.isBatter);
+      return pa ? { ...r, x: lerp(pa.x, r.x, t), y: lerp(pa.y, r.y, t) } : r;
+    }),
+  };
+  return m;
+}
+
+function drawDude(X, Y, shirt, cap, isRunner) {
+  px(X - 3, Y - 9, 6, 5, '#e9b98c');       // 머리
+  px(X - 4, Y - 11, 8, 3, cap);            // 모자
+  px(X - 4, Y - 4, 8, 7, shirt);           // 몸
+  px(X - 3, Y + 3, 2, 4, '#2b3a4e'); px(X + 1, Y + 3, 2, 4, '#2b3a4e');
+}
+
+function drawLivePlay(s) {
+  const t = now();
+  // 야수
+  s.fielders.forEach((f, i) => {
+    const X = fx(f[0]), Y = fy(f[1]);
+    drawDude(X, Y, '#e8e8e8', '#b33');
+    if (i === s.ctrl && !myBatting()) { // 조작 야수 마커
+      ctx.fillStyle = '#ffd23f';
+      ctx.beginPath(); ctx.moveTo(X, Y - 18); ctx.lineTo(X - 4, Y - 24); ctx.lineTo(X + 4, Y - 24); ctx.closePath(); ctx.fill();
+    }
+    if (i === s.holder) px(X + 4, Y - 4, 3, 3, '#fff');
+  });
+  // 주자
+  s.runners.forEach(r => {
+    const X = fx(r.x), Y = fy(r.y);
+    drawDude(X, Y, '#3457a0', '#234');
+    if (myBatting() && r.state !== 'onbase') {
+      textO(r.state === 'return' ? '귀루' : 'GO', X, Y - 18, 8, '#ffd23f');
+    }
+  });
+  // 공 + 그림자 + 궤적
+  if (s.holder < 0) {
+    const bx = fx(s.ball.x), by = fy(s.ball.y);
+    ctx.fillStyle = 'rgba(0,0,0,0.3)';
+    ctx.beginPath(); ctx.ellipse(bx, by, 3, 1.6, 0, 0, 7); ctx.fill();
+    const bz = by - s.ball.z * 0.55;
+    G.trail.push({ x: bx, y: bz, at: t });
+    while (G.trail.length && t - G.trail[0].at > (s.ball.hr ? 2400 : 500)) G.trail.shift();
+    if (G.trail.length > 1) {
+      ctx.strokeStyle = s.ball.hr ? 'rgba(255,210,63,0.9)' : 'rgba(255,255,255,0.35)';
+      ctx.lineWidth = s.ball.hr ? 2 : 1;
+      ctx.beginPath(); ctx.moveTo(G.trail[0].x, G.trail[0].y);
+      for (const p of G.trail) ctx.lineTo(p.x, p.y);
+      ctx.stroke();
+    }
+    ctx.fillStyle = '#fff';
+    ctx.beginPath(); ctx.arc(bx, bz, 2.5 + Math.min(2.5, s.ball.z * 0.018), 0, 7); ctx.fill();
+    ctx.strokeStyle = '#999'; ctx.lineWidth = 0.5;
+    ctx.beginPath(); ctx.arc(bx, bz, 2.5 + Math.min(2.5, s.ball.z * 0.018), 0, 7); ctx.stroke();
+  }
+  // 타구 정보 (잠깐)
+  if (G.inPlayInfo && t - G.inPlayInfo.at < 1800 && !G.inPlayInfo.bunt) {
+    textO(`${G.inPlayInfo.exitV}ft/s · ${G.inPlayInfo.la}°`, 320, 36, 11, '#fff');
+  }
+}
+
+function drawFieldUI() {
+  if (!G.st) return;
+  const s = G.snaps.length ? G.snaps[G.snaps.length - 1].s : null;
+  px(0, 342, W, 18, 'rgba(13,21,32,0.85)');
+  if (myBatting()) {
+    text('우클릭: 전체 진루   ·   SPACE: 정지/귀루', 320, 351, 10, '#ffd23f');
+  } else {
+    const holding = s && s.holder >= 0;
+    text(holding ? '1·2·3·H: 베이스 송구   ·   방향키/WASD: 이동' : '방향키/WASD: 야수 이동 (▼표시)', 320, 351, 10, '#ffd23f');
+    if (holding) { // 송구 타겟 강조
+      const B = G.cfg.field.bases;
+      [['1', 1], ['2', 2], ['3', 3], ['H', 0]].forEach(([lab, bi]) => {
+        textO(lab, fx(B[bi].x) + 9, fy(B[bi].y) - 8, 10, '#7dff8a');
+      });
+    }
+  }
+  if (s) {
+    // 아웃카운트
+    for (let i = 0; i < 3; i++) {
+      ctx.fillStyle = i < s.outs ? '#e54' : 'rgba(0,0,0,0.35)';
+      ctx.beginPath(); ctx.arc(22 + i * 14, 332, 4.5, 0, 7); ctx.fill();
+    }
+    textO('OUT', 22, 318, 9, '#fff', '#000', 'left');
+  }
+}
+
+/* ---------- 공통 HUD ---------- */
+function drawScoreboard() {
+  const st = G.st;
+  if (!st) return;
+  const innings = Math.max(9, st.inning);
+  const cw = 13, x0 = 86, y0 = 4, rh = 11;
+  const wTot = x0 + innings * cw + 3 * 16 + 6;
+  px(2, 2, wTot, 40, 'rgba(13,21,32,0.88)');
+  text('팀', x0 - 60, y0 + 5, 8, '#89a', 'left');
+  for (let i = 0; i < innings; i++) text(String(i + 1), x0 + i * cw + cw / 2, y0 + 5, 8, st.inning === i + 1 ? '#ffd23f' : '#89a');
+  ['R', 'H', 'E'].forEach((l, i) => text(l, x0 + innings * cw + i * 16 + 8, y0 + 5, 8, '#cde'));
+  [['away', 'AWAY'], ['home', 'HOME']].forEach(([side, label], row) => {
+    const y = y0 + 13 + row * rh + 4;
+    const isBat = st.battingSide === side;
+    text((isBat ? '▶' : ' ') + label + (G.you === side ? '(나)' : ''), 6, y, 9, G.you === side ? '#ffd23f' : '#fff', 'left');
+    const arr = st.score[side];
+    for (let i = 0; i < innings; i++) {
+      const v = arr[i];
+      text(v === undefined ? '-' : String(v), x0 + i * cw + cw / 2, y, 9, v > 0 ? '#ffd23f' : '#ccc');
+    }
+    const R = arr.reduce((a, b) => a + b, 0);
+    [[R, '#fff'], [st.hits[side], '#cde'], [st.errors[side], '#caa']].forEach(([v, c], i) =>
+      text(String(v), x0 + innings * cw + i * 16 + 8, y, 9, c));
+  });
+  // 이닝 표시
+  const halfTxt = st.half === 0 ? '초' : '말';
+  textO(`${st.inning}회${halfTxt}`, 600, 12, 13, '#fff');
+}
+
+function drawCommon(t) {
+  drawScoreboard();
+  // 마지막 플레이 텍스트
+  if (G.playMsg && t - G.playMsgAt < 4000) textO(G.playMsg, 320, 60, 12, '#fff');
+  // 판정 플래시
+  if (G.resultFlash && t - G.resultFlash.at < 900) {
+    const e = (t - G.resultFlash.at) / 900;
+    ctx.globalAlpha = 1 - e * e;
+    textO(G.resultFlash.text, 320, 130, 26, G.resultFlash.color);
+    ctx.globalAlpha = 1;
+  }
+  // 스플래시 (큰 텍스트)
+  G.splashes = G.splashes.filter(sp => t - sp.at < 1600);
+  G.splashes.forEach(sp => {
+    const e = (t - sp.at) / 1600;
+    const sc = e < 0.15 ? e / 0.15 : 1;
+    ctx.globalAlpha = e > 0.75 ? 1 - (e - 0.75) / 0.25 : 1;
+    textO(sp.text, 320, 150, Math.round(34 * sc) + 2, '#ffd23f', '#5a2b0e');
+    if (sp.sub) textO(sp.sub, 320, 178, 13, '#fff');
+    ctx.globalAlpha = 1;
+  });
+  // 콘페티
+  G.confetti = G.confetti.filter(c => t - c.at < 3000);
+  G.confetti.forEach(c => {
+    const e = (t - c.at) / 1000;
+    px(c.x + c.vx * e, c.y + c.vy * e + 30 * e * e, 3, 3, c.c);
+  });
+  // 배너
+  if (G.banner && t < G.banner.until) {
+    px(0, 158, W, 30, 'rgba(13,21,32,0.85)');
+    text(G.banner.text, 320, 173, 15, '#ffd23f');
+  }
+  // 핑
+  textO(`PING ${pingMs}ms`, 634, 352, 9, pingMs > 150 ? '#f88' : '#9fb6cc', '#000', 'right');
+  // 상대 이탈 카운트다운
+  if (G.oppGoneAt) {
+    const remain = Math.max(0, Math.ceil((G.oppDeadline - (t - G.oppGoneAt)) / 1000));
+    notice(`⚠ 상대 연결 끊김<br>재접속 대기: <b>${remain}초</b>`, true);
+    if (remain <= 0) G.oppGoneAt = 0;
+  }
+}
+
+/* ---------- 메인 루프 ---------- */
+function frame() {
+  const t = now();
+  ctx.clearRect(0, 0, W, H);
+  if (G.screen === 'title') {
+    // 타이틀 배경: 야구장 느낌
+    px(0, 0, W, H, '#1a2433');
+    for (let i = 0; i < 60; i++) px((i * 97) % W, (i * 53) % H, 2, 2, '#22324a');
+  } else {
+    // 페이드 전환
+    if (G.view !== G.viewTarget) {
+      G.fade = Math.min(1, G.fade + 0.09);
+      if (G.fade >= 1) G.view = G.viewTarget;
+    } else if (G.fade > 0) {
+      G.fade = Math.max(0, G.fade - 0.09);
+    }
+    if (G.view === 'pitch') drawPitchView(t); else drawFieldView();
+    drawCommon(t);
+    if (G.fade > 0) { ctx.fillStyle = `rgba(0,0,0,${G.fade})`; ctx.fillRect(0, 0, W, H); }
+  }
+  requestAnimationFrame(frame);
+}
+
+/* 캔버스 크기 (정수 배율 픽셀 스케일) */
+function fit() {
+  const k = Math.max(1, Math.floor(Math.min(innerWidth / W, innerHeight / H)));
+  cv.style.width = W * k + 'px'; cv.style.height = H * k + 'px';
+}
+addEventListener('resize', fit); fit();
+
+connect(false);
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

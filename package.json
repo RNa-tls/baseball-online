@@ -1,0 +1,17 @@
+{
+  "name": "dugout-duel",
+  "version": "1.0.0",
+  "description": "2-player online multiplayer baseball game (DUGOUT DUEL)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test test/engine.test.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "ws": "^8.18.0"
+  }
+}
