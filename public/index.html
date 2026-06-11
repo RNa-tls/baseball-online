@@ -529,6 +529,14 @@ function drawPitchBall(t) {
   const prog = clamp((e - P.windup) / P.flight, 0, 1);
   const b = pitchBallPos(prog, P);
   if (prog >= 1 && e > P.windup + P.flight + 700) return;
+  // 타자용 도달점 힌트: 비행 35% 이후 점점 선명해짐 (궤적을 "읽는" 보조)
+  if (myBatting() && prog > 0.35 && prog < 1 && !P.swung) {
+    const pp = pitchBallPos(1, P);
+    ctx.globalAlpha = Math.min(0.65, (prog - 0.35) / 0.5);
+    ctx.strokeStyle = '#ffd23f'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.arc(pp.x, pp.y, 7, 0, 7); ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
   ctx.fillStyle = '#fff';
   ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, 7); ctx.fill();
   ctx.strokeStyle = '#c44'; ctx.lineWidth = 1;
@@ -715,7 +723,7 @@ function sampleSnaps() {
 function mixSnap(a, b, t) {
   const m = {
     ball: { x: lerp(a.ball.x, b.ball.x, t), y: lerp(a.ball.y, b.ball.y, t), z: lerp(a.ball.z, b.ball.z, t), mode: b.ball.mode, hr: b.ball.hr },
-    holder: b.holder, ctrl: b.ctrl, outs: b.outs,
+    land: b.land, holder: b.holder, ctrl: b.ctrl, outs: b.outs,
     fielders: b.fielders.map((f, i) => [lerp(a.fielders[i][0], f[0], t), lerp(a.fielders[i][1], f[1], t)]),
     runners: b.runners.map(r => {
       const pa = a.runners.find(x => x.li === r.li && x.isBatter === r.isBatter);
@@ -752,6 +760,15 @@ function drawLivePlay(s) {
       textO(r.state === 'return' ? '귀루' : 'GO', X, Y - 18, 8, '#ffd23f');
     }
   });
+  // 낙하 예측점 X 마커 (수비 보조 — 야수를 여기로 보내면 포구)
+  if (s.land && s.holder < 0) {
+    const lx = fx(s.land.x), ly = fy(s.land.y);
+    ctx.strokeStyle = 'rgba(255,210,63,0.9)'; ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(lx - 5, ly - 5); ctx.lineTo(lx + 5, ly + 5);
+    ctx.moveTo(lx + 5, ly - 5); ctx.lineTo(lx - 5, ly + 5);
+    ctx.stroke();
+  }
   // 공 + 그림자 + 궤적
   if (s.holder < 0) {
     const bx = fx(s.ball.x), by = fy(s.ball.y);

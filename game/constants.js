@@ -12,11 +12,13 @@ const FIELD = {
     { x: -D, y: D },    // 3루
   ],
   mound: { x: 0, y: 59 },
-  // 펜스: 파울폴 330ft → 센터 400ft, 높이 10ft
+  // 펜스: 파울폴 ~318ft → 센터 388ft, 높이 10ft (밸런스 측정으로 단축 — CLAUDE.md)
   fenceHeight: 10,
+  fenceParams: { c: 388, drop: 70, exp: 1.2 },
   fenceDist(sprayDeg) {
     const a = Math.min(Math.abs(sprayDeg), 45) / 45;
-    return 400 - 70 * Math.pow(a, 1.2);
+    const F = this.fenceParams;
+    return F.c - F.drop * Math.pow(a, F.exp);
   },
   foulDeg: 45,
 };
@@ -58,11 +60,13 @@ const PITCHERS = [
 
 // 구종: flightMs = 기준 비행시간(파워/스태미나로 변동), break = 존 좌표 단위 무브먼트
 // ctrlMul = 제구 난이도 (커브/슬라이더는 제구 어려움)
+// flightMs는 사람 반응속도(인지 150~250ms + 마우스 조준) 기준으로 밸런싱.
+// tools/balance-sim.js 측정 결과로 조정 — 빠르게 만들수록 컨택률이 급락한다.
 const PITCH_KINDS = {
-  FOUR:   { label: '직구',    flightMs: 430, breakX: 0,     breakY: -0.10, ctrlMul: 1.0 },
-  SLIDER: { label: '슬라이더', flightMs: 510, breakX: 0.55,  breakY: 0.15,  ctrlMul: 1.25 },
-  CURVE:  { label: '커브',    flightMs: 580, breakX: 0.15,  breakY: 0.75,  ctrlMul: 1.3 },
-  CHANGE: { label: '체인지업', flightMs: 600, breakX: -0.10, breakY: 0.35,  ctrlMul: 1.1 },
+  FOUR:   { label: '직구',    flightMs: 560, breakX: 0,     breakY: -0.10, ctrlMul: 1.0 },
+  SLIDER: { label: '슬라이더', flightMs: 650, breakX: 0.55,  breakY: 0.15,  ctrlMul: 1.25 },
+  CURVE:  { label: '커브',    flightMs: 720, breakX: 0.15,  breakY: 0.75,  ctrlMul: 1.3 },
+  CHANGE: { label: '체인지업', flightMs: 760, breakX: -0.10, breakY: 0.35,  ctrlMul: 1.1 },
 };
 
 // 존 좌표: x,y ∈ [-1,1]이 스트라이크존. 공 반경 보정 1.12까지 스트라이크.

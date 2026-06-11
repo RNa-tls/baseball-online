@@ -163,12 +163,15 @@ class GameEngine {
     const aimX = clamp(+p.aim.x || 0, -2, 2), aimY = clamp(+p.aim.y || 0, -2, 2);
     const terr = dt - total;
     const d = dist2(aimX, aimY, plate.x, plate.y);
-    const timingWin = bunt ? 170 : 60 + bat.con * 7;
-    const hitWin = bunt ? 1.0 : 0.48 + bat.con * 0.05;
+    const twoK = this.strikes >= 2 ? 1.15 : 1; // 2스트라이크 커트 보정
+    const timingWin = (bunt ? 190 : 70 + bat.con * 7) * twoK;
+    const hitWin = (bunt ? 1.05 : 0.50 + bat.con * 0.055) * twoK;
+    const tN = Math.abs(terr) / timingWin, dN = d / hitWin;
 
-    if (d > hitWin || Math.abs(terr) > timingWin) { this.addStrike('swinging'); return; }
-    const q = (1 - d / hitWin) * (1 - Math.abs(terr) / timingWin);
-    if (q < 0.1) { // 파울팁
+    if (dN > 1.3 || tN > 1.18) { this.addStrike('swinging'); return; }
+    if (dN > 1 || tN > 1) { this.foulBall(bunt); return; } // 가장자리 컨택 → 파울로 살림
+    const q = (1 - dN) * (1 - tN);
+    if (q < 0.18) { // 약한 컨택 → 파울팁 (인플레이 평균 질을 높게 유지)
       this.foulBall(bunt);
       return;
     }
@@ -178,9 +181,9 @@ class GameEngine {
       la = -4 + this.randn() * 6;
       spray = (aimX - plate.x) * 35 + this.randn() * 18;
     } else {
-      exitV = 55 + q * (52 + bat.pow * 8.5) + this.randn() * 6;
+      exitV = 64 + Math.pow(q, 0.8) * (66 + bat.pow * 11) + this.randn() * 6;
       la = 18 - (aimY - plate.y) * 58 + this.randn() * 8; // 공 위를 치면 땅볼, 아래 받치면 플라이
-      spray = terr * 0.5 + (plate.x - aimX) * 18 + this.randn() * 8; // 빠른 스윙=당겨침(좌측)
+      spray = terr * 0.42 + (plate.x - aimX) * 18 + this.randn() * 8; // 빠른 스윙=당겨침(좌측)
     }
     la = clamp(la, -14, 64);
     spray = clamp(spray, -65, 65);
@@ -301,7 +304,7 @@ class GameEngine {
     this.live = {
       ball, fielders, runners,
       ctrl: -1, ctrlTimer: 0, userDir: { x: 0, y: 0 },
-      outsThisPlay: 0, runsThisPlay: 0, errorThisPlay: false,
+      outsThisPlay: 0, runsThisPlay: 0, errorThisPlay: false, fcOut: false,
       caughtFly: false, batterOut: false, batterBase: 0,
       settleTimer: 0, playTimer: 0, hrTimer: 0,
       isGround, bunt,
@@ -341,6 +344,7 @@ class GameEngine {
     const b = this.live.ball;
     const c = { x: b.x, y: b.y, z: b.z, vx: b.vx, vy: b.vy, vz: b.vz, mode: b.mode };
     const pts = [{ x: c.x, y: c.y, t: 0 }];
+    let land = null; // 첫 낙하 지점 (뜬공 수비의 목표점)
     const dt = 0.1;
     for (let t = dt; t <= 3.0; t += dt) {
       if (c.mode === 'fly') {
@@ -350,6 +354,7 @@ class GameEngine {
         c.vz -= (G + c.vz * k) * dt;
         c.x += c.vx * dt; c.y += c.vy * dt; c.z += c.vz * dt;
         if (c.z <= 0 && c.vz < 0) {
+          if (!land) land = { x: c.x, y: c.y, t };
           c.z = 0; c.vz = -c.vz * 0.45; c.vx *= 0.65; c.vy *= 0.65;
           if (c.vz < 4) { c.vz = 0; c.mode = 'rolling'; }
         }
@@ -360,6 +365,7 @@ class GameEngine {
       }
       pts.push({ x: c.x, y: c.y, t });
     }
+    pts.land = land;
     return pts;
   }
 
@@ -369,7 +375,8 @@ class GameEngine {
     if (!force && L.ctrlTimer > 0) return;
     L.ctrlTimer = 500;
     const path = this.predictPath();
-    let best = -1, bestCost = 1e9;
+    L.predLand = (L.ball.mode === 'fly' && !L.ball.bounced) ? path.land : null;
+    const costs = [];
     for (let i = 0; i < 9; i++) {
       const f = L.fielders[i];
       let cost = 1e9;
@@ -378,9 +385,18 @@ class GameEngine {
         const c = deficit + p.t * 2; // 같은 조건이면 빨리 닿는 쪽
         if (c < cost) cost = c;
       }
-      if (cost < bestCost - 0.01) { bestCost = cost; best = i; }
+      costs.push(cost);
     }
+    let best = 0;
+    for (let i = 1; i < 9; i++) if (costs[i] < costs[best] - 0.01) best = i;
     L.ctrl = best;
+    // AI 추격은 1명만 (나머지는 베이스 커버/백업) — 수비 과밀 방지
+    let second = -1;
+    for (let i = 0; i < 9; i++) {
+      if (i === best) continue;
+      if (second === -1 || costs[i] < costs[second]) second = i;
+    }
+    L.aiChase = second;
   }
 
   handleMove(side, dir) {
@@ -596,9 +612,16 @@ class GameEngine {
           tx = bp.x; ty = bp.y;
         } else if (cover === 0 && key === 'P') {
           tx = POSITIONS[i].x; ty = POSITIONS[i].y;
-        } else { // 외야수: 홈 포지션에서 공 쪽으로 절반쯤 백업 이동
+        } else { // 외야수: 지정 추격자만 낙하점/공으로 전력, 나머지는 백업 드리프트
           const hx = POSITIONS[i].x, hy = POSITIONS[i].y;
-          tx = lerp(hx, L.ball.x, 0.4); ty = lerp(hy, L.ball.y, 0.4);
+          const chasing = i === L.aiChase && L.ball.holder < 0;
+          if (chasing && L.predLand && L.ball.mode === 'fly' && !L.ball.bounced) {
+            tx = L.predLand.x; ty = L.predLand.y;
+          } else if (chasing) {
+            tx = L.ball.x; ty = L.ball.y;
+          } else {
+            tx = lerp(hx, L.ball.x, 0.35); ty = lerp(hy, L.ball.y, 0.35);
+          }
         }
         const dx = tx - f.x, dy = ty - f.y;
         const d = Math.hypot(dx, dy);
@@ -727,6 +750,7 @@ class GameEngine {
         const tb = this.baseXY(r.to);
         const forced = r.isBatter ? r.to === 1 : this.isForcedLive(r);
         if (forced && dist2(holder.x, holder.y, tb.x, tb.y) < 2.5 && r.prog < 0.99) {
+          if (!r.isBatter) this.live.fcOut = true; // 야수선택 — 타자 안타 아님
           this.runnerOut(r, '포스 아웃');
           if (this.phase !== 'LIVE') return; // 3아웃으로 플레이 종료됨
           continue;
@@ -785,7 +809,8 @@ class GameEngine {
       for (const r of L.runners) {
         if (!r.out && !r.scored && r.state !== 'onbase') {
           r.state = 'onbase';
-          r.from = r.to = r.prog >= 0.5 ? r.to : r.from; r.prog = 0;
+          const b = r.prog >= 0.5 ? r.to : r.from;
+          r.from = r.to = Math.min(b, 3); r.prog = 0; // 홈 직전이어도 득점은 인정 안 함 → 3루로
         }
       }
       this.finishPlay();
@@ -810,11 +835,11 @@ class GameEngine {
       }
     } else if (br && br.scored) {
       summary = `${this.batter().name} 인사이드파크 홈런!`;
-      if (!L.errorThisPlay) this.hits[side]++;
+      if (!L.errorThisPlay && !L.fcOut) this.hits[side]++;
     } else if (br) {
       const base = br.state === 'onbase' ? br.from : br.to;
       const names = { 1: '안타', 2: '2루타', 3: '3루타' };
-      if (!L.errorThisPlay) {
+      if (!L.errorThisPlay && !L.fcOut) {
         this.hits[side]++;
         summary = `${this.batter().name} ${names[base] || '안타'}!`;
         if (base >= 2) this.emit('splash', { text: base === 3 ? 'TRIPLE!' : 'DOUBLE!', sub: summary });
@@ -833,6 +858,7 @@ class GameEngine {
     for (const r of L.runners) {
       if (r.out || r.scored) continue;
       let b = r.state === 'onbase' ? r.from : (r.prog >= 0.5 ? r.to : r.from);
+      b = Math.min(b, 3);
       while (b >= 1 && b <= 3 && this.bases[b] !== null) b--; // 중복 점유 방지
       if (b >= 1 && b <= 3) this.bases[b] = r.li;
     }
@@ -908,7 +934,10 @@ class GameEngine {
   getSnapshot() {
     const L = this.live;
     if (!L) return null;
+    const land = (L.predLand && L.ball.mode === 'fly' && !L.ball.bounced && L.ball.holder < 0 && !L.ball.hr)
+      ? { x: +L.predLand.x.toFixed(0), y: +L.predLand.y.toFixed(0) } : null;
     return {
+      land,
       ball: { x: +L.ball.x.toFixed(1), y: +L.ball.y.toFixed(1), z: +L.ball.z.toFixed(1), mode: L.ball.mode, hr: L.ball.hr },
       holder: L.ball.holder,
       ctrl: L.ctrl,

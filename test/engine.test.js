@@ -204,6 +204,18 @@ test('병살: 1루 주자 + 땅볼 → 2루-1루 연결', () => {
   assert.ok(evs.some(ev => ev.t === 'splash' && ev.text === 'DOUBLE PLAY!'), 'DP 스플래시');
 });
 
+test('야수선택: 선행주자 포스아웃이면 타자 안타 아님', () => {
+  const e = mk(11);
+  e.bases = [null, 7, null, null]; // 1루: 8번(느림)
+  e.batterIdx.away = 0;            // 타자: 1번(빠름) — 2루 포스아웃 후 1루 세이프
+  e.startLive(95, 0, -20, false, 0.5);
+  driveDefense(e, [2]);            // 2루만 송구 (병살 시도 없음)
+  assert.strictEqual(e.phase, 'PITCHING');
+  assert.strictEqual(e.outs, 1, '선행주자 포스아웃');
+  assert.strictEqual(e.bases[1], 0, '타자는 1루 세이프');
+  assert.strictEqual(e.hits.away, 0, '야수선택 — 안타 아님');
+});
+
 test('희생플라이: 외야 플라이 포구 → 3루주자 태그업 득점', () => {
   const e = mk(3);
   e.bases = [null, null, null, 0]; // 3루: 1번(빠름)

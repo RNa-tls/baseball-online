@@ -17,7 +17,7 @@ const wss = new WebSocketServer({ server, maxPayload: 4096 });
 // 클라이언트는 이 config만으로 렌더링 (서버/클라 상수 중복 방지)
 const CLIENT_CONFIG = {
   lineup: LINEUP, pitchers: PITCHERS, positions: POSITIONS,
-  field: { bases: FIELD.bases, mound: FIELD.mound, fenceHeight: FIELD.fenceHeight, fence: { c: 400, drop: 70, exp: 1.2 }, foulDeg: FIELD.foulDeg },
+  field: { bases: FIELD.bases, mound: FIELD.mound, fenceHeight: FIELD.fenceHeight, fence: FIELD.fenceParams, foulDeg: FIELD.foulDeg },
   pitchKinds: PITCH_KINDS, zoneEdge: ZONE_EDGE, rules: { swingGraceMs: RULES.swingGraceMs, windupMs: RULES.windupMs },
 };
 
